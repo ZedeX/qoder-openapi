@@ -1,0 +1,6 @@
+node_modules/
+gateway.log
+*.log
+.env
+.env.local
+.history.md
