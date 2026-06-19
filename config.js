@@ -52,8 +52,8 @@ const config = {
     },
   },
 
-  // Default model
-  defaultModel: 'qwork-auto',
+  // Default model (qmodel_latest is free, qwork-auto/ultimate require subscription)
+  defaultModel: 'qmodel_latest',
 
   // Default max turns for chat
   defaultMaxTurns: 1,

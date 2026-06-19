@@ -45,9 +45,13 @@ function getStatusFromCli() {
       }
 
       const output = (stdout || '').trim();
-      const loggedIn = output.toLowerCase().includes('logged in') && !output.toLowerCase().includes('not logged in');
+      // Detect login status: check for "logged in" keyword, or presence of Username/Email fields
+      const hasLoggedInKeyword = output.toLowerCase().includes('logged in') && !output.toLowerCase().includes('not logged in');
+      const hasUsernameField = /Username:\s*\S+/i.test(output);
+      const hasEmailField = /Email:\s*\S+/i.test(output);
+      const loggedIn = hasLoggedInKeyword || (hasUsernameField && hasEmailField);
 
-      // Parse username from output like "Account: username (email@example.com)"
+      // Parse username from output like "Account: username (email@example.com)" or "Username: username"
       let username = '';
       let email = '';
       const accountMatch = output.match(/Account:\s*(.+)/i);
@@ -60,6 +64,15 @@ function getStatusFromCli() {
         } else {
           username = accountInfo;
         }
+      }
+      // Also try "Username:" and "Email:" fields
+      if (!username) {
+        const usernameMatch = output.match(/Username:\s*(.+)/i);
+        if (usernameMatch) username = usernameMatch[1].trim();
+      }
+      if (!email) {
+        const emailMatch = output.match(/Email:\s*(.+)/i);
+        if (emailMatch) email = emailMatch[1].trim();
       }
 
       resolve({ loggedIn, username, email, raw: output });
@@ -202,4 +215,5 @@ module.exports = {
   setAccessToken,
   clearTokenCache,
   getEnvToken,
+  getStatusFromCli,
 };
