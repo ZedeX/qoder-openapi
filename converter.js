@@ -75,11 +75,11 @@ function sdkStreamEventToOpenAIChunk(msg, model, completionId) {
   }
   // Handle thinking content - include as special format
   else if (delta.thinking) {
-    content = `<<thinking>>${delta.thinking}<</thinking>>`;
+    content = delta.thinking;
     qoderType = 'thinking';
   }
   else if (contentBlock.type === 'thinking' && contentBlock.thinking) {
-    content = `<<thinking>>${contentBlock.thinking}<</thinking>>`;
+    content = contentBlock.thinking;
     qoderType = 'thinking';
   }
   // Handle tool_use content block start
@@ -209,6 +209,42 @@ function extractThinkingFromAssistantMessage(msg) {
 /**
  * Generate a completion ID
  */
+/**
+ * Extract tool_use content blocks from SDK assistant message
+ */
+function extractToolUseFromAssistantMessage(msg) {
+  if (!msg || msg.type !== 'assistant' || !msg.message || !msg.message.content) { return []; }
+  const toolUses = [];
+  for (const block of msg.message.content) {
+    if (block.type === 'tool_use') {
+      toolUses.push({ id: block.id || '', name: block.name || '', input: block.input || {} });
+    }
+  }
+  return toolUses;
+}
+
+function extractToolResultFromUserMessage(msg) {
+  if (!msg || msg.type !== 'user' || !msg.message || !msg.message.content) { return []; }
+  const results = [];
+  for (const block of msg.message.content) {
+    if (block.type === 'tool_result') {
+      let contentText = '';
+      if (typeof block.content === 'string') { contentText = block.content; }
+      else if (Array.isArray(block.content)) {
+        contentText = block.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+      }
+      if (!contentText && block.tool_use_result && block.tool_use_result.stdout) {
+        contentText = block.tool_use_result.stdout;
+      }
+      results.push({ tool_use_id: block.tool_use_id || '', content: contentText, is_error: block.is_error || false });
+    }
+  }
+  return results;
+}
+
+/**
+ * Generate a completion ID
+ */
 function generateCompletionId() {
   return 'chatcmpl-' + uuidv4().replace(/-/g, '').substring(0, 24);
 }
@@ -278,6 +314,8 @@ module.exports = {
   sdkResultToOpenAICompletion,
   extractTextFromAssistantMessage,
   extractThinkingFromAssistantMessage,
+  extractToolUseFromAssistantMessage,
+  extractToolResultFromUserMessage,
   generateCompletionId,
   createModelListResponse,
   createModelInfoResponse,

@@ -7,6 +7,7 @@ const logger = require('./logger');
 const auth = require('./auth');
 const converter = require('./converter');
 const messageLogger = require('./message-logger');
+const sessionStore = require('./session-store');
 
 // Save original process.env BEFORE SDK configure() modifies it
 // (sdk.query() sets process.env.QODER_ENTRYPOINT = "sdk-ts")
@@ -63,6 +64,7 @@ async function* queryViaDirectCLI(prompt, options = {}) {
   const args = [
     '--model', model,
     '--max-turns', String(maxTurns),
+    '--permission-mode', 'bypassPermissions',
     '--output-format', 'stream-json',
     'prompt', prompt,
   ];
@@ -76,6 +78,7 @@ async function* queryViaDirectCLI(prompt, options = {}) {
   delete cleanEnv.QODER_ENTRYPOINT;
   delete cleanEnv.QODERCLI_INTEGRATION_MODE;
   delete cleanEnv.QODER_ENABLE_SDK_FILE_CHECKPOINTING;
+  cleanEnv.CHCP = '65001';
 
   logger.info('Spawning qodercli.exe directly', { cliPath, args: args.join(' ') });
 
@@ -118,7 +121,7 @@ async function* queryViaDirectCLI(prompt, options = {}) {
 
   logger.info('DirectCLI: setting up stdout handler');
   child.stdout.on('data', (data) => {
-    const rawText = data.toString();
+    const rawText = data.toString('utf-8');
     logger.info('DirectCLI: stdout data received', { bytes: rawText.length, preview: rawText.substring(0, 200) });
     lineBuffer += rawText;
     const lines = lineBuffer.split('\n');
@@ -138,7 +141,7 @@ async function* queryViaDirectCLI(prompt, options = {}) {
 
   logger.info('DirectCLI: setting up stderr handler');
   child.stderr.on('data', (data) => {
-    const text = data.toString().trim();
+    const text = data.toString('utf-8').trim();
     if (text) {
       logger.warn('qodercli stderr', { text: text.substring(0, 500) });
     }
@@ -294,6 +297,81 @@ app.get('/api/logs/:id', (req, res) => {
 app.delete('/api/logs', (req, res) => {
   messageLogger.clearLogs();
   res.json({ message: 'All logs cleared' });
+});
+
+// ==================== Session API ====================
+
+/**
+ * GET /api/sessions - List all sessions (summary)
+ */
+app.get('/api/sessions', (req, res) => {
+  const sessions = sessionStore.listSessions();
+  res.json({ sessions });
+});
+
+/**
+ * POST /api/sessions - Create a new session
+ */
+app.post('/api/sessions', (req, res) => {
+  const { title, model, messages } = req.body;
+  const session = sessionStore.createSession({ title, model, messages });
+  res.status(201).json(session);
+});
+
+/**
+ * GET /api/sessions/:id - Get a session with full messages
+ */
+app.get('/api/sessions/:id', (req, res) => {
+  const session = sessionStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({ error: { message: 'Session not found' } });
+  }
+  res.json(session);
+});
+
+/**
+ * PATCH /api/sessions/:id - Update session (title, model, messages)
+ */
+app.patch('/api/sessions/:id', (req, res) => {
+  const session = sessionStore.updateSession(req.params.id, req.body);
+  if (!session) {
+    return res.status(404).json({ error: { message: 'Session not found' } });
+  }
+  res.json(session);
+});
+
+/**
+ * POST /api/sessions/:id/messages - Add a message to a session
+ */
+app.post('/api/sessions/:id/messages', (req, res) => {
+  const { role, content } = req.body;
+  if (!role || content === undefined) {
+    return res.status(400).json({ error: { message: 'role and content are required' } });
+  }
+  const session = sessionStore.addMessage(req.params.id, { role, content });
+  if (!session) {
+    return res.status(404).json({ error: { message: 'Session not found' } });
+  }
+  res.json(session);
+});
+
+/**
+ * DELETE /api/sessions/:id - Delete a session
+ */
+app.delete('/api/sessions/:id', (req, res) => {
+  const deleted = sessionStore.deleteSession(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: { message: 'Session not found' } });
+  }
+  res.json({ message: 'Session deleted' });
+});
+
+/**
+ * DELETE /api/sessions - Delete all sessions
+ */
+app.delete('/api/sessions', (req, res) => {
+  sessionStore.clearAllSessions();
+  res.json({ message: 'All sessions cleared' });
 });
 
 // ==================== Endpoints ====================
@@ -618,6 +696,17 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (thinking) {
               fullThinking += thinking;
               messageLogger.addThinking(msgLogId, thinking);
+
+              // Send thinking SSE chunk
+              const thinkingChunk = {
+                id: requestId,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: resolvedModel,
+                choices: [{ index: 0, delta: { content: thinking }, finish_reason: null }],
+                _qoder_type: 'thinking',
+              };
+              res.write(converter.formatSSE(thinkingChunk));
             }
 
             if (useDirectCLI) {
@@ -668,6 +757,20 @@ app.post('/v1/chat/completions', async (req, res) => {
                   const toolInfo = { id: block.id, type: block.type, name: block.name, input: block.input };
                   toolUseList.push(toolInfo);
                   messageLogger.addToolUse(msgLogId, toolInfo);
+
+                  // Send tool_use SSE chunk
+                  const toolUseChunk = {
+                    id: requestId,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: resolvedModel,
+                    choices: [{ index: 0, delta: {}, finish_reason: null }],
+                    _qoder_type: 'tool_use',
+                    _qoder_tool_name: block.name || '',
+                    _qoder_tool_input: block.input || {},
+                    _qoder_tool_id: block.id || '',
+                  };
+                  res.write(converter.formatSSE(toolUseChunk));
                 }
               }
             }
@@ -679,9 +782,31 @@ app.post('/v1/chat/completions', async (req, res) => {
               fullText = msg.result;
               messageLogger.addContent(msgLogId, msg.result);
             }
+
+          } else if (msg.type === 'user') {
+            // Handle tool_result from user messages
+            const toolResults = converter.extractToolResultFromUserMessage(msg);
+            for (const tr of toolResults) {
+              const toolResultChunk = {
+                id: requestId,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: resolvedModel,
+                choices: [{
+                  index: 0,
+                  delta: { content: tr.content },
+                  finish_reason: null,
+                }],
+                _qoder_type: 'tool_result',
+                _qoder_tool_id: tr.tool_use_id,
+                _qoder_is_error: tr.is_error,
+              };
+              res.write(converter.formatSSE(toolResultChunk));
+            }
+
+
           }
-          // Skip system, user, and other message types
-        }
+      }
       } catch (streamErr) {
         if (streamErr.name === 'AbortError' || abortController.signal.aborted) {
           logger.info('Stream aborted', { requestId });
