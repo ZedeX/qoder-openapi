@@ -4,3 +4,4 @@ gateway.log
 .env
 .env.local
 .history.md
+messages.jsonl

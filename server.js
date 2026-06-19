@@ -5,6 +5,7 @@ const config = require('./config');
 const logger = require('./logger');
 const auth = require('./auth');
 const converter = require('./converter');
+const messageLogger = require('./message-logger');
 
 // Initialize and configure the SDK
 let sdk = null;
@@ -43,6 +44,7 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // API key authentication middleware
 function apiKeyAuth(req, res, next) {
@@ -70,6 +72,42 @@ function apiKeyAuth(req, res, next) {
 
 // Apply API key auth to /v1/ routes
 app.use('/v1/', apiKeyAuth);
+
+// ==================== Message Logs API ====================
+
+/**
+ * GET /api/logs - List recent message logs
+ */
+app.get('/api/logs', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const offset = parseInt(req.query.offset) || 0;
+  const result = messageLogger.getLogs(limit, offset);
+  res.json(result);
+});
+
+/**
+ * GET /api/logs/:id - Get a specific log entry
+ */
+app.get('/api/logs/:id', (req, res) => {
+  const log = messageLogger.getLog(req.params.id);
+  if (!log) {
+    return res.status(404).json({
+      error: {
+        message: 'Log entry not found',
+        type: 'not_found',
+      },
+    });
+  }
+  res.json(log);
+});
+
+/**
+ * DELETE /api/logs - Clear all logs
+ */
+app.delete('/api/logs', (req, res) => {
+  messageLogger.clearLogs();
+  res.json({ message: 'All logs cleared' });
+});
 
 // ==================== Endpoints ====================
 
@@ -144,6 +182,7 @@ app.get('/v1/models/:model', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   const startTime = Date.now();
   const requestId = converter.generateCompletionId();
+  let msgLogId = null;
 
   try {
     // Ensure SDK is initialized
@@ -185,6 +224,18 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: !!stream,
       messageCount: messages.length,
       promptLength: prompt.length,
+    });
+
+    // Start message logging
+    msgLogId = messageLogger.startLog({
+      requestId,
+      model: resolvedModel,
+      messages,
+      stream: !!stream,
+      max_tokens: max_tokens || 0,
+      temperature: temperature || 0,
+      max_turns: max_turns || config.defaultMaxTurns,
+      prompt,
     });
 
     // Create abort controller
@@ -284,31 +335,59 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.write(converter.formatSSE(roleChunk));
 
       let fullText = '';
+      let fullThinking = '';
+      let toolUseList = [];
       let resultMsg = null;
 
       try {
         for await (const msg of queryResult) {
           if (abortController.signal.aborted) break;
 
+          // Log every SDK message
+          messageLogger.addSdkMessage(msgLogId, msg);
+
           if (msg.type === 'stream_event') {
             // Handle streaming partial messages
             const chunk = converter.sdkStreamEventToOpenAIChunk(msg, resolvedModel, requestId);
             if (chunk) {
-              // Accumulate text content (not thinking)
-              if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content) {
-                const content = chunk.choices[0].delta.content;
-                // Skip thinking markers in accumulation
-                if (!content.startsWith('<<thinking>>') && !content.startsWith('<</thinking>>')) {
-                  fullText += content;
+              // Detect content type and log accordingly
+              const qoderType = chunk._qoder_type || 'text';
+              const deltaContent = chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content;
+
+              if (deltaContent) {
+                if (qoderType === 'thinking') {
+                  fullThinking += deltaContent;
+                  messageLogger.addThinking(msgLogId, deltaContent);
+                } else if (qoderType === 'tool_use') {
+                  // Tool use content is logged via addToolUse from content blocks
+                } else {
+                  // Regular text - skip thinking markers in accumulation
+                  if (!deltaContent.startsWith('<<thinking>>') && !deltaContent.startsWith('<</thinking>>')) {
+                    fullText += deltaContent;
+                  }
+                  messageLogger.addContent(msgLogId, deltaContent);
                 }
               }
+
+              // Log tool_use from content blocks
+              if (qoderType === 'tool_use' && chunk._qoder_tool) {
+                toolUseList.push(chunk._qoder_tool);
+                messageLogger.addToolUse(msgLogId, chunk._qoder_tool);
+              }
+
               res.write(converter.formatSSE(chunk));
             }
           } else if (msg.type === 'assistant') {
             // Handle complete assistant messages
             const text = converter.extractTextFromAssistantMessage(msg);
+            const thinking = converter.extractThinkingFromAssistantMessage(msg);
+            if (thinking) {
+              fullThinking += thinking;
+              messageLogger.addThinking(msgLogId, thinking);
+            }
             if (text && !fullText) {
               fullText = text;
+              messageLogger.addContent(msgLogId, text);
               // If we haven't sent any streaming content yet, send the full text
               const textChunk = {
                 id: requestId,
@@ -323,6 +402,16 @@ app.post('/v1/chat/completions', async (req, res) => {
               };
               res.write(converter.formatSSE(textChunk));
             }
+            // Extract tool_use from assistant message content blocks
+            if (msg.message && msg.message.content) {
+              for (const block of msg.message.content) {
+                if (block.type === 'tool_use') {
+                  const toolInfo = { id: block.id, type: block.type, name: block.name, input: block.input };
+                  toolUseList.push(toolInfo);
+                  messageLogger.addToolUse(msgLogId, toolInfo);
+                }
+              }
+            }
           } else if (msg.type === 'result') {
             resultMsg = msg;
           }
@@ -331,8 +420,10 @@ app.post('/v1/chat/completions', async (req, res) => {
       } catch (streamErr) {
         if (streamErr.name === 'AbortError' || abortController.signal.aborted) {
           logger.info('Stream aborted', { requestId });
+          messageLogger.errorLog(msgLogId, 'Stream aborted');
         } else {
           logger.error('Stream error', { requestId, error: streamErr.message });
+          messageLogger.errorLog(msgLogId, streamErr.message);
           // Try to send error as a chunk
           const errorChunk = {
             id: requestId,
@@ -375,19 +466,54 @@ app.post('/v1/chat/completions', async (req, res) => {
         textLength: fullText.length,
       });
 
+      // Complete message log
+      const usage = resultMsg && resultMsg.usage ? {
+        prompt_tokens: resultMsg.usage.input_tokens || 0,
+        completion_tokens: resultMsg.usage.output_tokens || 0,
+        total_tokens: (resultMsg.usage.input_tokens || 0) + (resultMsg.usage.output_tokens || 0),
+      } : {};
+      messageLogger.completeLog(msgLogId, {
+        content: fullText,
+        thinking: fullThinking,
+        toolUse: toolUseList,
+        finishReason: 'stop',
+        usage,
+      });
+
     } else {
       // Non-streaming response
       let fullText = '';
+      let fullThinking = '';
+      let toolUseList = [];
       let resultMsg = null;
 
       try {
         for await (const msg of queryResult) {
           if (abortController.signal.aborted) break;
 
+          // Log every SDK message
+          messageLogger.addSdkMessage(msgLogId, msg);
+
           if (msg.type === 'assistant') {
             const text = converter.extractTextFromAssistantMessage(msg);
+            const thinking = converter.extractThinkingFromAssistantMessage(msg);
             if (text) {
               fullText += text;
+              messageLogger.addContent(msgLogId, text);
+            }
+            if (thinking) {
+              fullThinking += thinking;
+              messageLogger.addThinking(msgLogId, thinking);
+            }
+            // Extract tool_use from assistant message content blocks
+            if (msg.message && msg.message.content) {
+              for (const block of msg.message.content) {
+                if (block.type === 'tool_use') {
+                  const toolInfo = { id: block.id, type: block.type, name: block.name, input: block.input };
+                  toolUseList.push(toolInfo);
+                  messageLogger.addToolUse(msgLogId, toolInfo);
+                }
+              }
             }
           } else if (msg.type === 'stream_event') {
             // Accumulate text from stream events even in non-streaming mode
@@ -395,6 +521,11 @@ app.post('/v1/chat/completions', async (req, res) => {
             const delta = event.delta || {};
             if (delta.text) {
               fullText += delta.text;
+              messageLogger.addContent(msgLogId, delta.text);
+            }
+            if (delta.thinking) {
+              fullThinking += delta.thinking;
+              messageLogger.addThinking(msgLogId, delta.thinking);
             }
           } else if (msg.type === 'result') {
             resultMsg = msg;
@@ -402,6 +533,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       } catch (queryErr) {
         if (queryErr.name === 'AbortError' || abortController.signal.aborted) {
+          messageLogger.errorLog(msgLogId, 'Request timed out');
           return res.status(408).json({
             error: {
               message: 'Request timed out',
@@ -410,6 +542,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           });
         }
         logger.error('Query error', { requestId, error: queryErr.message });
+        messageLogger.errorLog(msgLogId, queryErr.message);
         return res.status(500).json({
           error: {
             message: queryErr.message || 'Internal server error',
@@ -442,6 +575,20 @@ app.post('/v1/chat/completions', async (req, res) => {
         usage: completion.usage,
       });
 
+      // Complete message log
+      const usage = resultMsg && resultMsg.usage ? {
+        prompt_tokens: resultMsg.usage.input_tokens || 0,
+        completion_tokens: resultMsg.usage.output_tokens || 0,
+        total_tokens: (resultMsg.usage.input_tokens || 0) + (resultMsg.usage.output_tokens || 0),
+      } : completion.usage || {};
+      messageLogger.completeLog(msgLogId, {
+        content: fullText,
+        thinking: fullThinking,
+        toolUse: toolUseList,
+        finishReason: 'stop',
+        usage,
+      });
+
       res.json(completion);
     }
 
@@ -451,6 +598,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       error: err.message,
       stack: err.stack,
     });
+
+    // Log error to message logger
+    if (msgLogId) {
+      messageLogger.errorLog(msgLogId, err.message);
+    }
 
     if (!res.headersSent) {
       res.status(500).json({
@@ -500,6 +652,7 @@ function startServer() {
     console.log(`  Chat:    http://localhost:${port}/v1/chat/completions`);
     console.log(`  Health:  http://localhost:${port}/health`);
     console.log(`  Status:  http://localhost:${port}/status`);
+    console.log(`  Logs:    http://localhost:${port}/api/logs`);
     console.log(`  API Key: ${config.apiKey ? 'configured' : 'none (open access)'}`);
     console.log('');
   });

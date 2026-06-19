@@ -60,40 +60,72 @@ function sdkStreamEventToOpenAIChunk(msg, model, completionId) {
   const contentBlock = event.content_block || {};
 
   let content = null;
+  let qoderType = 'text';
+  let qoderTool = null;
 
   // Handle text delta
   if (delta.text) {
     content = delta.text;
+    qoderType = 'text';
   }
   // Handle text content block start
   else if (contentBlock.type === 'text' && contentBlock.text) {
     content = contentBlock.text;
+    qoderType = 'text';
   }
   // Handle thinking content - include as special format
   else if (delta.thinking) {
-    content = `<think>${delta.thinking}</think>`;
+    content = `<<thinking>>${delta.thinking}<</thinking>>`;
+    qoderType = 'thinking';
   }
   else if (contentBlock.type === 'thinking' && contentBlock.thinking) {
-    content = `<think>${contentBlock.thinking}</think>`;
+    content = `<<thinking>>${contentBlock.thinking}<</thinking>>`;
+    qoderType = 'thinking';
+  }
+  // Handle tool_use content block start
+  else if (contentBlock.type === 'tool_use') {
+    qoderType = 'tool_use';
+    qoderTool = {
+      id: contentBlock.id || '',
+      type: 'tool_use',
+      name: contentBlock.name || '',
+      input: {},
+    };
+    content = null;
+  }
+  // Handle tool_use input delta
+  else if (delta.partial_json) {
+    qoderType = 'tool_use';
+    content = null;
   }
 
-  if (content === null) {
+  if (content === null && qoderType !== 'tool_use') {
     return null;
   }
 
-  return {
+  const chunk = {
     id: completionId,
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
     model: model,
     choices: [{
       index: 0,
-      delta: {
+      delta: content !== null ? {
         content: content,
-      },
+      } : {},
       finish_reason: null,
     }],
   };
+
+  // Add custom _qoder_type field for all chunks
+  chunk._qoder_type = qoderType;
+
+  // Add _qoder_tool field for tool_use chunks
+  if (qoderTool) {
+    chunk._qoder_tool = qoderTool;
+  }
+
+  return chunk;
 }
 
 /**
