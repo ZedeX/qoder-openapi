@@ -1,7 +1,26 @@
+# Dependencies
 node_modules/
+
+# Logs
 gateway.log
 *.log
+*.log.*
+
+# Runtime data
+data/
+messages.jsonl
+
+# Environment / secrets
 .env
 .env.local
+
+# Local history / notes
 .history.md
-messages.jsonl
+
+# Temporary / dev scripts (kept locally, not tracked in git)
+_*.js
+test-*.js
+check-db.js
+debug-output.txt
+dev/
+tests/

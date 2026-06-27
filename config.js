@@ -16,9 +16,13 @@ const config = {
     cliPath: process.env.QODER_CLI_PATH || 'd:\\_program\\QoderWork\\resources\\bin\\qodercli.exe',
   },
 
-  // SDK module path
+  // Qoder CLI config directory (~/.qoder by default, where .auth/.models/logs live)
+  // The SDK uses this as storageDir for session listing and auth.
+  qoderConfigDir: process.env.QODER_CONFIG_DIR || path.join(os.homedir(), '.qoder'),
+
+  // SDK module path (package was renamed from @ali/qoder-agent-sdk to @qoder-ai/qoder-agent-sdk)
   sdk: {
-    modulePath: process.env.QODER_SDK_PATH || 'd:\\_program\\QoderWork\\resources\\app.asar.unpacked\\node_modules\\@ali\\qoder-agent-sdk',
+    modulePath: process.env.QODER_SDK_PATH || 'd:\\_program\\QoderWork\\resources\\app.asar.unpacked\\node_modules\\@qoder-ai\\qoder-agent-sdk',
   },
 
   // Integration mode for the SDK
@@ -64,8 +68,14 @@ const config = {
   // Log file path
   logFile: path.join(__dirname, 'gateway.log'),
 
-  // Request timeout (ms)
-  requestTimeout: parseInt(process.env.GATEWAY_TIMEOUT || '300000', 10),
+  // Log rotation: max file size in bytes before rotation (default 10 MB)
+  logMaxBytes: parseInt(process.env.GATEWAY_LOG_MAX_BYTES || String(10 * 1024 * 1024), 10),
+
+  // Log rotation: max number of historical log files to keep (gateway.log.1 .. gateway.log.N)
+  logMaxFiles: parseInt(process.env.GATEWAY_LOG_MAX_FILES || '5', 10),
+
+  // Request timeout (ms) — default 30 minutes to allow long agent runs
+  requestTimeout: parseInt(process.env.GATEWAY_REQUEST_TIMEOUT || process.env.GATEWAY_TIMEOUT || '1800000', 10),
 };
 
 module.exports = config;

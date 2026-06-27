@@ -150,7 +150,7 @@ function sdkResultToOpenAICompletion(resultMsg, fullText, model, completionId) {
     content = resultMsg.result;
   }
 
-  const finishReason = resultMsg && resultMsg.subtype === 'success' ? 'stop' : 'stop';
+  const finishReason = resultMsg && resultMsg.subtype === 'error_during_execution' ? 'error' : 'stop';
 
   return {
     id: completionId,
@@ -206,9 +206,6 @@ function extractThinkingFromAssistantMessage(msg) {
   return thinkingParts.join('\n');
 }
 
-/**
- * Generate a completion ID
- */
 /**
  * Extract tool_use content blocks from SDK assistant message
  */
@@ -295,6 +292,67 @@ function createModelInfoResponse(modelId) {
 }
 
 /**
+ * Detect Qoder upstream errors embedded in assistant text content.
+ * Returns { statusCode, code, message, raw } when the text matches a known
+ * Qoder API error pattern, or null if the text looks like normal content.
+ *
+ * Known patterns:
+ *   - "Qoder API error: FORBIDDEN - {"code":"112",...}"  -> 403 (subscription required, code 112)
+ *   - "Qoder API error: UNAUTHORIZED ..."                 -> 401
+ *   - "Qoder API error: ..." (generic)                    -> 502
+ */
+function detectQoderError(text) {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.match(/Qoder API error:\s*(\w+)\s*-\s*(\{.*\})/);
+  if (!match) return null;
+
+  const errorType = match[1];
+  let innerCode = null;
+  let innerMessage = '';
+  try {
+    const inner = JSON.parse(match[2]);
+    innerCode = inner.code ? String(inner.code) : null;
+    if (inner.message) {
+      // message may itself be a JSON string
+      try {
+        const msgObj = JSON.parse(inner.message);
+        innerMessage = msgObj.pricingUrl ? 'Subscription required' : inner.message;
+      } catch {
+        innerMessage = inner.message;
+      }
+    }
+  } catch {
+    // not JSON, use raw
+  }
+
+  // Map to HTTP status
+  let statusCode = 502;
+  let httpCode = 'upstream_error';
+  if (errorType === 'FORBIDDEN' && innerCode === '112') {
+    // QoderWork server returns 403 FORBIDDEN with code 112 when the account
+    // has no valid subscription (even for the "free" qmodel_latest model).
+    // We mirror the server's actual 403 status instead of remapping to 402.
+    statusCode = 403;
+    httpCode = 'forbidden';
+    innerMessage = innerMessage || 'QoderWork subscription required to use this model';
+  } else if (errorType === 'UNAUTHORIZED') {
+    statusCode = 401;
+    httpCode = 'upstream_unauthorized';
+    innerMessage = innerMessage || 'QoderWork authentication required';
+  } else if (errorType === 'FORBIDDEN') {
+    statusCode = 403;
+    httpCode = 'upstream_forbidden';
+  }
+
+  return {
+    statusCode,
+    code: httpCode,
+    message: innerMessage || `Qoder API error: ${errorType}`,
+    raw: match[0],
+  };
+}
+
+/**
  * Create SSE data line
  */
 function formatSSE(data) {
@@ -321,4 +379,5 @@ module.exports = {
   createModelInfoResponse,
   formatSSE,
   formatSSEDone,
+  detectQoderError,
 };

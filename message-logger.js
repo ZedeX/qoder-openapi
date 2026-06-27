@@ -20,11 +20,15 @@ class MessageLogger {
   }
 
   _appendToJsonl(entry) {
+    // Fire-and-forget async append — avoids blocking the event loop on every
+    // streamed chunk. Errors are logged but never thrown to the caller.
     try {
       const line = JSON.stringify(entry) + '\n';
-      fs.appendFileSync(JSONL_FILE, line, 'utf8');
+      fs.promises.appendFile(JSONL_FILE, line, 'utf8').catch((err) => {
+        console.error('[MessageLogger] Failed to append to JSONL:', err.message);
+      });
     } catch (err) {
-      console.error('[MessageLogger] Failed to append to JSONL:', err.message);
+      console.error('[MessageLogger] Failed to serialize JSONL entry:', err.message);
     }
   }
 

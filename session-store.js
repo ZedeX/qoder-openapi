@@ -35,15 +35,49 @@ function load() {
   }
 }
 
-// Save to disk
+// Save to disk (debounced async to avoid blocking the event loop on every
+// message append). Call flushSave() at process exit to ensure pending writes
+// are persisted.
+let saveTimer = null;
+const SAVE_DEBOUNCE_MS = 300;
+
 function save() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    doSave();
+  }, SAVE_DEBOUNCE_MS);
+}
+
+function doSave() {
+  try {
+    const data = { sessions, order: sessionOrder, savedAt: new Date().toISOString() };
+    fs.promises.writeFile(SESSIONS_FILE, JSON.stringify(data, null, 2), 'utf-8').catch((e) => {
+      console.error('Failed to save sessions:', e.message);
+    });
+  } catch (e) {
+    console.error('Failed to serialize sessions:', e.message);
+  }
+}
+
+// Force-flush any pending debounced save (used at process exit)
+function flushSave() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
   try {
     const data = { sessions, order: sessionOrder, savedAt: new Date().toISOString() };
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (e) {
-    console.error('Failed to save sessions:', e.message);
+    console.error('Failed to flush sessions:', e.message);
   }
 }
+
+// Ensure pending writes are flushed when the process exits
+process.on('exit', flushSave);
+process.on('SIGINT', () => { flushSave(); process.exit(0); });
+process.on('SIGTERM', () => { flushSave(); process.exit(0); });
 
 // Generate unique ID
 function generateId() {
@@ -181,4 +215,5 @@ module.exports = {
   addMessage,
   deleteSession,
   clearAllSessions,
+  flushSave,
 };

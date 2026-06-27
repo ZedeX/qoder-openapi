@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const config = require('./config');
 const logger = require('./logger');
@@ -8,6 +9,7 @@ const auth = require('./auth');
 const converter = require('./converter');
 const messageLogger = require('./message-logger');
 const sessionStore = require('./session-store');
+const qoderSdk = require('./qoder-sdk');
 
 // Save original process.env BEFORE SDK configure() modifies it
 // (sdk.query() sets process.env.QODER_ENTRYPOINT = "sdk-ts")
@@ -236,6 +238,14 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Timing-safe string comparison to prevent timing attacks
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 // API key authentication middleware
 function apiKeyAuth(req, res, next) {
   if (!config.apiKey) return next();
@@ -247,7 +257,10 @@ function apiKeyAuth(req, res, next) {
 
   const queryKey = req.query['api_key'];
 
-  if (bearerToken === config.apiKey || queryKey === config.apiKey) {
+  if (
+    (bearerToken && safeEqual(bearerToken, config.apiKey)) ||
+    (queryKey && safeEqual(queryKey, config.apiKey))
+  ) {
     return next();
   }
 
@@ -260,8 +273,9 @@ function apiKeyAuth(req, res, next) {
   });
 }
 
-// Apply API key auth to /v1/ routes
+// Apply API key auth to /v1/ and /api/ routes
 app.use('/v1/', apiKeyAuth);
+app.use('/api/', apiKeyAuth);
 
 // ==================== Message Logs API ====================
 
@@ -373,6 +387,201 @@ app.delete('/api/sessions', (req, res) => {
   sessionStore.clearAllSessions();
   res.json({ message: 'All sessions cleared' });
 });
+
+// ==================== Qoder Capability Endpoints ====================
+// These expose QoderWork's full capabilities beyond just chat completions.
+
+// Helper: wrap async handler with error handling
+function asyncHandler(fn) {
+  return (req, res) => fn(req, res).catch((err) => {
+    logger.error('Qoder API error', { path: req.path, error: err.message || err });
+    res.status(500).json({
+      error: err.message || 'Internal error',
+      detail: typeof err === 'string' ? err : err.error || undefined,
+    });
+  });
+}
+
+/**
+ * GET /api/qoder/pipe-status — Check if QoderWork IDE pipe is connectable
+ */
+app.get('/api/qoder/pipe-status', asyncHandler(async (req, res) => {
+  const connectable = await qoderSdk.checkPipeConnectable();
+  res.json({ connectable });
+}));
+
+/**
+ * GET /api/qoder/account — Full account info (pipe with CLI fallback)
+ */
+app.get('/api/qoder/account', asyncHandler(async (req, res) => {
+  const status = await qoderSdk.getAccountStatus();
+  res.json(status);
+}));
+
+/**
+ * GET /api/qoder/usage — Quota/usage info (pipe only, no CLI fallback)
+ */
+app.get('/api/qoder/usage', asyncHandler(async (req, res) => {
+  try {
+    const usage = await qoderSdk.getUsage();
+    res.json(usage);
+  } catch (err) {
+    res.status(503).json({
+      error: 'Usage endpoint requires running QoderWork IDE (pipe transport)',
+      detail: err.message || String(err),
+    });
+  }
+}));
+
+/**
+ * GET /api/qoder/models — Real model list from IDE/CLI (with gateway fallback)
+ */
+app.get('/api/qoder/models', asyncHandler(async (req, res) => {
+  const result = await qoderSdk.getRealModels(req.query);
+  res.json(result);
+}));
+
+/**
+ * GET /api/qoder/data-policy — Data privacy policy state (pipe only)
+ */
+app.get('/api/qoder/data-policy', asyncHandler(async (req, res) => {
+  try {
+    const result = await qoderSdk.getDataPolicy();
+    res.json(result);
+  } catch (err) {
+    res.status(503).json({
+      error: 'Data-policy endpoint requires running QoderWork IDE (pipe transport)',
+      detail: err.message || String(err),
+    });
+  }
+}));
+
+/**
+ * GET /api/qoder/access — QoderWork beta access check (pipe only)
+ */
+app.get('/api/qoder/access', asyncHandler(async (req, res) => {
+  try {
+    const result = await qoderSdk.checkQoderWorkAccess();
+    res.json(result);
+  } catch (err) {
+    res.status(503).json({
+      error: 'Access endpoint requires running QoderWork IDE (pipe transport)',
+      detail: err.message || String(err),
+    });
+  }
+}));
+
+/**
+ * GET /api/qoder/skills — List installed skills via CLI
+ */
+app.get('/api/qoder/skills', asyncHandler(async (req, res) => {
+  const skills = await qoderSdk.listSkills();
+  res.json({ skills });
+}));
+
+/**
+ * GET /api/qoder/agents — List built-in/custom agents via CLI
+ */
+app.get('/api/qoder/agents', asyncHandler(async (req, res) => {
+  const agents = await qoderSdk.listAgents();
+  res.json({ agents });
+}));
+
+/**
+ * GET /api/qoder/mcp — List configured MCP servers via CLI
+ */
+app.get('/api/qoder/mcp', asyncHandler(async (req, res) => {
+  const servers = await qoderSdk.listMcpServers();
+  res.json({ servers });
+}));
+
+/**
+ * GET /api/qoder/plugins — List installed plugins via CLI
+ */
+app.get('/api/qoder/plugins', asyncHandler(async (req, res) => {
+  const plugins = await qoderSdk.listPlugins();
+  res.json({ plugins });
+}));
+
+/**
+ * GET /api/qoder/config/:key — Read a CLI config value
+ */
+app.get('/api/qoder/config/:key', asyncHandler(async (req, res) => {
+  const result = await qoderSdk.getConfigValue(req.params.key);
+  res.json(result);
+}));
+
+/**
+ * GET /api/qoder/sessions — Cross-project sessions (powered by SDK local store)
+ */
+app.get('/api/qoder/sessions', asyncHandler(async (req, res) => {
+  const sessions = qoderSdk.listSessions({
+    directory: req.query.directory,
+    limit: parseInt(req.query.limit) || 50,
+  });
+  res.json({ sessions });
+}));
+
+/**
+ * GET /api/qoder/sessions/:id — Single session metadata
+ */
+app.get('/api/qoder/sessions/:id', asyncHandler(async (req, res) => {
+  const info = qoderSdk.getSessionInfo(req.params.id, req.query.directory);
+  if (!info) return res.status(404).json({ error: { message: 'Session not found' } });
+  res.json(info);
+}));
+
+/**
+ * GET /api/qoder/sessions/:id/messages — Session message replay (paginated)
+ */
+app.get('/api/qoder/sessions/:id/messages', asyncHandler(async (req, res) => {
+  const messages = qoderSdk.getSessionMessages(req.params.id, {
+    directory: req.query.directory,
+    limit: parseInt(req.query.limit) || 100,
+    offset: parseInt(req.query.offset) || 0,
+  });
+  res.json({ messages });
+}));
+
+/**
+ * PATCH /api/qoder/sessions/:id — Rename a session
+ */
+app.patch('/api/qoder/sessions/:id', asyncHandler(async (req, res) => {
+  const result = qoderSdk.renameSession(req.params.id, req.body.title, req.body.directory);
+  res.json(result);
+}));
+
+/**
+ * POST /api/qoder/sessions/:id/tag — Tag (or clear with null) a session
+ */
+app.post('/api/qoder/sessions/:id/tag', asyncHandler(async (req, res) => {
+  const result = qoderSdk.tagSession(req.params.id, req.body.tag, req.body.directory);
+  res.json(result);
+}));
+
+/**
+ * POST /api/qoder/commit — AI-generate and run a git commit
+ */
+app.post('/api/qoder/commit', asyncHandler(async (req, res) => {
+  const result = await qoderSdk.generateCommit(req.body.message, req.body.cwd);
+  res.json(result);
+}));
+
+/**
+ * POST /api/qoder/wiki — Generate project wiki
+ */
+app.post('/api/qoder/wiki', asyncHandler(async (req, res) => {
+  const result = await qoderSdk.generateWiki(req.body.args, req.body.cwd);
+  res.json(result);
+}));
+
+/**
+ * POST /api/qoder/feedback — Submit product feedback
+ */
+app.post('/api/qoder/feedback', asyncHandler(async (req, res) => {
+  const result = await qoderSdk.submitFeedback(req.body);
+  res.json(result);
+}));
 
 // ==================== Endpoints ====================
 
@@ -709,6 +918,42 @@ app.post('/v1/chat/completions', async (req, res) => {
               res.write(converter.formatSSE(thinkingChunk));
             }
 
+            // Detect upstream Qoder errors (e.g. FORBIDDEN code 112 = subscription issue).
+            // The CLI synthesizes an assistant message containing the error text — we must
+            // NOT stream it as normal content. Instead emit an error SSE event so the
+            // client can surface it appropriately.
+            if (text) {
+              const qoderErr = converter.detectQoderError(text);
+              if (qoderErr) {
+                fullText = text;
+                messageLogger.addContent(msgLogId, text);
+                messageLogger.errorLog(msgLogId, qoderErr.message);
+                logger.warn('Upstream Qoder error detected', {
+                  requestId,
+                  statusCode: qoderErr.statusCode,
+                  code: qoderErr.code,
+                  message: qoderErr.message,
+                });
+                // Send an error SSE event so well-behaved clients can react
+                const errorEvent = {
+                  id: requestId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: resolvedModel,
+                  choices: [{ index: 0, delta: {}, finish_reason: null }],
+                  _qoder_type: 'error',
+                  _qoder_error: {
+                    status_code: qoderErr.statusCode,
+                    code: qoderErr.code,
+                    message: qoderErr.message,
+                  },
+                };
+                try { res.write(converter.formatSSE(errorEvent)); } catch {}
+                // Skip normal text streaming for this error message
+                continue;
+              }
+            }
+
             if (useDirectCLI) {
               // Direct CLI mode: assistant messages may arrive incrementally.
               // Calculate delta text (new content since last sent) and stream it.
@@ -956,6 +1201,26 @@ app.post('/v1/chat/completions', async (req, res) => {
         logger.warn('Empty response received - user may not be logged in', { requestId });
       }
 
+      // Detect upstream Qoder errors in non-streaming mode (e.g. FORBIDDEN code 112).
+      // Return the proper HTTP status instead of shipping the raw error text as content.
+      const qoderErr = converter.detectQoderError(fullText);
+      if (qoderErr) {
+        logger.warn('Upstream Qoder error detected', {
+          requestId,
+          statusCode: qoderErr.statusCode,
+          code: qoderErr.code,
+          message: qoderErr.message,
+        });
+        messageLogger.errorLog(msgLogId, qoderErr.message);
+        return res.status(qoderErr.statusCode).json({
+          error: {
+            message: qoderErr.message,
+            type: 'upstream_error',
+            code: qoderErr.code,
+          },
+        });
+      }
+
       // Build completion response
       const completion = converter.sdkResultToOpenAICompletion(
         resultMsg,
@@ -1033,7 +1298,18 @@ function startServer() {
 
   const port = config.port;
   app.listen(port, () => {
-    logger.info(`QoderWork API Gateway started`, {
+    const banner = `
+  QoderWork API Gateway
+  =====================
+  Server:  http://localhost:${port}
+  Models:  http://localhost:${port}/v1/models
+  Chat:    http://localhost:${port}/v1/chat/completions
+  Health:  http://localhost:${port}/health
+  Status:  http://localhost:${port}/status
+  Logs:    http://localhost:${port}/api/logs
+  API Key: ${config.apiKey ? 'configured' : 'none (open access)'}
+`;
+    logger.info('QoderWork API Gateway started', {
       port,
       models: Object.keys(config.models),
       defaultModel: config.defaultModel,
@@ -1042,17 +1318,8 @@ function startServer() {
       resourceDir: config.qoderwork.resourceDir,
       cliPath: config.qoderwork.cliPath,
     });
-    console.log('');
-    console.log(`  QoderWork API Gateway`);
-    console.log(`  =====================`);
-    console.log(`  Server:  http://localhost:${port}`);
-    console.log(`  Models:  http://localhost:${port}/v1/models`);
-    console.log(`  Chat:    http://localhost:${port}/v1/chat/completions`);
-    console.log(`  Health:  http://localhost:${port}/health`);
-    console.log(`  Status:  http://localhost:${port}/status`);
-    console.log(`  Logs:    http://localhost:${port}/api/logs`);
-    console.log(`  API Key: ${config.apiKey ? 'configured' : 'none (open access)'}`);
-    console.log('');
+    logger.info('Startup banner', { banner });
+    console.log(banner);
   });
 }
 

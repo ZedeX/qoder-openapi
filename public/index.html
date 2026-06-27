@@ -1389,6 +1389,18 @@ function handleChunk(chunk) {
     addToolResultCard(toolId, resContent, isError);
     return;
   }
+  if (chunk._qoder_type === 'error') {
+    const qoderErr = chunk._qoder_error || {};
+    const statusCode = qoderErr.status_code || 0;
+    const code = qoderErr.code || 'unknown';
+    const message = qoderErr.message || 'Unknown upstream error';
+    let hint = '';
+    if (statusCode === 403 || statusCode === 402 || code === 'forbidden' || code === 'payment_required' || code === '112') {
+      hint = '\n\n这是 QoderWork 账户订阅问题（FORBIDDEN code 112）。\n免费模型 qmodel_latest 也需要有效订阅才能使用。\n请访问 https://qoder.com/pricing 检查账户套餐。';
+    }
+    addErrorBubble(`[上游错误 ${statusCode} ${code}] ${message}${hint}`);
+    return;
+  }
 
   // Regular content
   if (delta.content) {

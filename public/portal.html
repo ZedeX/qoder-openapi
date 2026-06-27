@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QoderWork API Gateway — Portal</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    h1 { color: #58a6ff; margin-bottom: 8px; font-size: 24px; }
+    .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
+    .grid { display: grid; gap: 16px; margin-bottom: 24px; }
+    .grid-2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 16px;
+    }
+    .card h2 {
+      color: #58a6ff;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card h2 .badge {
+      background: #238636;
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: normal;
+    }
+    .card h2 .badge.warn { background: #d29922; }
+    .card h2 .badge.err { background: #da3633; }
+    .card h2 .badge.off { background: #6e7681; }
+    .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+    .row:last-child { border-bottom: none; }
+    .row .k { color: #8b949e; }
+    .row .v { color: #c9d1d9; font-family: 'SFMono-Regular', Consolas, monospace; }
+    .row .v.ok { color: #3fb950; }
+    .row .v.err { color: #f85149; }
+    .row .v.warn { color: #d29922; }
+    .loading { color: #8b949e; padding: 12px 0; }
+    .spinner {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid #30363d; border-top-color: #58a6ff;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+      margin-right: 6px; vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .empty { color: #6e7681; padding: 16px 0; font-size: 13px; }
+    .warn-msg {
+      background: #3d2e00; color: #d29922; padding: 8px 12px;
+      border-radius: 4px; margin-bottom: 8px; font-size: 13px;
+      border-left: 3px solid #d29922;
+    }
+    .model-card {
+      background: #21262d; padding: 10px 12px; border-radius: 4px;
+      border-left: 3px solid #58a6ff;
+    }
+    .model-card.default { border-left-color: #3fb950; }
+    .model-card .name { color: #c9d1d9; font-weight: 500; font-size: 13px; }
+    .model-card .desc { color: #8b949e; font-size: 12px; margin-top: 2px; }
+    .model-card .source {
+      display: inline-block; padding: 1px 6px; border-radius: 8px;
+      font-size: 10px; background: #30363d; color: #8b949e; margin-left: 6px;
+    }
+    .session-item {
+      padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 13px;
+    }
+    .session-item:last-child { border-bottom: none; }
+    .session-item .title { color: #c9d1d9; }
+    .session-item .meta { color: #8b949e; font-size: 11px; margin-top: 2px; }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .refresh-btn {
+      background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+      padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    .refresh-btn:hover { background: #30363d; }
+    .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="header-row">
+    <div>
+      <h1>QoderWork API Gateway</h1>
+      <div class="subtitle">Web Portal — account / models / sessions / capabilities</div>
+    </div>
+    <button class="refresh-btn" onclick="loadAll()">↻ Refresh All</button>
+  </div>
+
+  <div class="grid grid-3">
+    <div class="card" id="cardAccount">
+      <h2>Account <span class="badge" id="accountBadge">...</span></h2>
+      <div id="dashAccount"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+    <div class="card" id="cardPipe">
+      <h2>Pipe Transport <span class="badge" id="pipeBadge">...</span></h2>
+      <div id="dashPipe"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+    <div class="card" id="cardUsage">
+      <h2>Usage / Quota</h2>
+      <div id="dashUsage"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+  </div>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <h2>Models <span class="badge" id="modelsBadge">...</span></h2>
+      <div id="dashModels"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+    <div class="card">
+      <h2>Recent Sessions</h2>
+      <div id="dashSessions"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+  </div>
+
+  <div class="grid grid-3">
+    <div class="card">
+      <h2>Skills</h2>
+      <div id="dashSkills"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+    <div class="card">
+      <h2>Agents</h2>
+      <div id="dashAgents"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+    <div class="card">
+      <h2>MCP Servers</h2>
+      <div id="dashMcp"><div class="loading"><span class="spinner"></span>Loading…</div></div>
+    </div>
+  </div>
+
+  <script>
+    function $(id) { return document.getElementById(id); }
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+
+    async function apiGet(path) {
+      const r = await fetch(path);
+      if (!r.ok) {
+        const txt = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${txt}`);
+      }
+      return r.json();
+    }
+
+    function setBadge(id, text, cls) {
+      const el = $(id);
+      el.textContent = text;
+      el.className = 'badge ' + (cls || '');
+    }
+
+    async function loadAccount() {
+      const el = $('dashAccount');
+      try {
+        const d = await apiGet('/api/qoder/account');
+        let html = '';
+        if (d && d.loggedIn) {
+          setBadge('accountBadge', 'LOGGED IN', 'ok');
+          html += `<div class="row"><span class="k">Username</span><span class="v ok">${escapeHtml(d.username)}</span></div>`;
+          html += `<div class="row"><span class="k">Email</span><span class="v">${escapeHtml(d.email)}</span></div>`;
+        } else if (d && d.username) {
+          setBadge('accountBadge', 'CLI ONLY', 'warn');
+          html += `<div class="row"><span class="k">Username</span><span class="v warn">${escapeHtml(d.username)}</span></div>`;
+          html += `<div class="row"><span class="k">Email</span><span class="v">${escapeHtml(d.email)}</span></div>`;
+        } else {
+          setBadge('accountBadge', 'NOT LOGGED IN', 'err');
+          html += `<div class="empty">未登录 — 请在 QoderWork IDE 中登录</div>`;
+        }
+        if (d && d.version) {
+          html += `<div class="row"><span class="k">CLI Version</span><span class="v">${escapeHtml(d.version)}</span></div>`;
+        }
+        if (d && d.source) {
+          html += `<div class="row"><span class="k">Source</span><span class="v">${escapeHtml(d.source)}</span></div>`;
+        }
+        if (d && d.avatarUrl) {
+          html += `<div class="row"><span class="k">Avatar</span><span class="v"><a href="${escapeHtml(d.avatarUrl)}" target="_blank">view</a></span></div>`;
+        }
+        el.innerHTML = html;
+      } catch (err) {
+        setBadge('accountBadge', 'ERROR', 'err');
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadPipe() {
+      const el = $('dashPipe');
+      try {
+        const d = await apiGet('/api/qoder/pipe-status');
+        if (d && d.connectable) {
+          setBadge('pipeBadge', 'READY', 'ok');
+          el.innerHTML = `<div class="row"><span class="k">Status</span><span class="v ok">connectable</span></div>
+                          <div class="row"><span class="k">Transport</span><span class="v">Named Pipe</span></div>`;
+        } else {
+          setBadge('pipeBadge', 'UNREADY', 'off');
+          el.innerHTML = `<div class="row"><span class="k">Status</span><span class="v err">not connectable</span></div>
+                          <div class="row"><span class="k">Fallback</span><span class="v warn">CLI subprocess</span></div>
+                          <div class="empty" style="margin-top:8px">启动 QoderWork IDE 后可启用管道传输（更快、支持 usage/data-policy 等端点）</div>`;
+        }
+      } catch (err) {
+        setBadge('pipeBadge', 'ERROR', 'err');
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadUsage() {
+      const el = $('dashUsage');
+      try {
+        const d = await apiGet('/api/qoder/usage');
+        let html = '';
+        if (d && d.total !== undefined) {
+          const used = d.used || 0;
+          const total = d.total || 0;
+          const remaining = d.remaining != null ? d.remaining : (total - used);
+          const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+          html += `<div class="row"><span class="k">Used</span><span class="v">${used}</span></div>`;
+          html += `<div class="row"><span class="k">Total</span><span class="v">${total}</span></div>`;
+          html += `<div class="row"><span class="k">Remaining</span><span class="v ${remaining > 0 ? 'ok' : 'err'}">${remaining}</span></div>`;
+          html += `<div class="row"><span class="k">Usage %</span><span class="v ${pct > 80 ? 'err' : pct > 50 ? 'warn' : 'ok'}">${pct}%</span></div>`;
+          if (d.expiry) {
+            html += `<div class="row"><span class="k">Expiry</span><span class="v">${escapeHtml(d.expiry)}</span></div>`;
+          }
+          if (d.upgradeUrl) {
+            html += `<div class="row"><span class="k">Upgrade</span><span class="v"><a href="${escapeHtml(d.upgradeUrl)}" target="_blank">pricing ↗</a></span></div>`;
+          }
+        } else {
+          html = `<div class="empty">${escapeHtml(JSON.stringify(d).substring(0, 200))}</div>`;
+        }
+        el.innerHTML = html;
+      } catch (err) {
+        el.innerHTML = `<div class="empty">Usage needs IDE pipe: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadModels() {
+      const el = $('dashModels');
+      el.innerHTML = '<div class="loading"><span class="spinner"></span>加载中…</div>';
+      try {
+        const d = await apiGet('/api/qoder/models');
+        const models = (d && d.models) || [];
+        let html = '';
+        if (d && d.fallback) {
+          html += '<div class="warn-msg">⚠️ 模型列表来自 CLI 降级数据，可能不是最新（IDE 管道未连接）</div>';
+        }
+        if (d && d.warning) {
+          html += '<div class="warn-msg">⚠️ ' + escapeHtml(d.warning) + '</div>';
+        }
+        if (!models.length) {
+          html += '<div class="empty">无可用模型 — 账户可能没有有效订阅，或模型列表为空。<br>请检查 QoderWork 订阅状态，或在 IDE 中重新登录。</div>';
+          setBadge('modelsBadge', 'EMPTY', 'err');
+          el.innerHTML = html;
+          return;
+        }
+        setBadge('modelsBadge', models.length + ' AVAILABLE', 'ok');
+        html += '<div class="grid grid-2">';
+        models.forEach(m => {
+          const isDefault = m.isDefault || m.key === 'qmodel_latest';
+          html += `<div class="model-card ${isDefault ? 'default' : ''}">
+            <div class="name">${escapeHtml(m.displayName || m.key)}${isDefault ? ' (default)' : ''}<span class="source">${escapeHtml(m.source || 'unknown')}</span></div>
+            ${m.description ? `<div class="desc">${escapeHtml(m.description)}</div>` : ''}
+            ${m.ownedBy ? `<div class="desc">owned by ${escapeHtml(m.ownedBy)}</div>` : ''}
+          </div>`;
+        });
+        html += '</div>';
+        el.innerHTML = html;
+      } catch (err) {
+        setBadge('modelsBadge', 'ERROR', 'err');
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadSessions() {
+      const el = $('dashSessions');
+      try {
+        const d = await apiGet('/api/qoder/sessions?limit=10');
+        const sessions = (d && d.sessions) || [];
+        if (!sessions.length) {
+          el.innerHTML = '<div class="empty">No sessions found</div>';
+          return;
+        }
+        let html = '';
+        sessions.forEach(s => {
+          const title = s.summary || s.title || s.firstPrompt || '(untitled)';
+          const time = s.createdAt ? new Date(s.createdAt).toLocaleString('zh-CN') : '';
+          const branch = s.gitBranch ? ` · ${s.gitBranch}` : '';
+          html += `<div class="session-item">
+            <div class="title">${escapeHtml(title.substring(0, 80))}</div>
+            <div class="meta">${escapeHtml(time)}${escapeHtml(branch)} · ${escapeHtml(s.cwd || '')}</div>
+          </div>`;
+        });
+        el.innerHTML = html;
+      } catch (err) {
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadSkills() {
+      const el = $('dashSkills');
+      try {
+        const d = await apiGet('/api/qoder/skills');
+        const skills = (d && d.skills) || [];
+        if (!skills.length) {
+          el.innerHTML = '<div class="empty">No skills installed</div>';
+          return;
+        }
+        let html = '';
+        skills.slice(0, 15).forEach(s => {
+          const status = s.enabled ? 'ok' : 'err';
+          const label = s.enabled ? 'ON' : 'OFF';
+          html += `<div class="row"><span class="k">${escapeHtml(s.name)}</span><span class="v ${status}">${label}</span></div>`;
+        });
+        if (skills.length > 15) {
+          html += `<div class="empty">…and ${skills.length - 15} more</div>`;
+        }
+        el.innerHTML = html;
+      } catch (err) {
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadAgents() {
+      const el = $('dashAgents');
+      try {
+        const d = await apiGet('/api/qoder/agents');
+        const agents = (d && d.agents) || [];
+        if (!agents.length) {
+          el.innerHTML = '<div class="empty">No agents</div>';
+          return;
+        }
+        let html = '';
+        agents.forEach(a => {
+          html += `<div class="row"><span class="k">${escapeHtml(a.name)}</span><span class="v">${escapeHtml(a.model || '')}</span></div>`;
+        });
+        el.innerHTML = html;
+      } catch (err) {
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadMcp() {
+      const el = $('dashMcp');
+      try {
+        const d = await apiGet('/api/qoder/mcp');
+        const servers = (d && d.servers) || [];
+        if (!servers.length) {
+          el.innerHTML = '<div class="empty">No MCP servers configured</div>';
+          return;
+        }
+        let html = '';
+        servers.forEach(s => {
+          html += `<div class="row"><span class="k">${escapeHtml(s.name)}</span><span class="v">${escapeHtml(s.status || '')}</span></div>`;
+        });
+        el.innerHTML = html;
+      } catch (err) {
+        el.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadAll() {
+      await Promise.allSettled([
+        loadAccount(),
+        loadPipe(),
+        loadUsage(),
+        loadModels(),
+        loadSessions(),
+        loadSkills(),
+        loadAgents(),
+        loadMcp(),
+      ]);
+    }
+
+    loadAll();
+    // Auto-refresh every 30s
+    setInterval(loadAll, 30000);
+  </script>
+</body>
+</html>
